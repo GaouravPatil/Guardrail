@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-var Version = getEnv("APP_VERSION", "v1")
+var Version = getEnv("APP_VERSION", "v2")
 
 func getEnv(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
