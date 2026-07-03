@@ -57,4 +57,4 @@ jobs:
       - name: Deploy and verify
         run: |
           chmod +x scripts/deploy-and-verify.sh scripts/health-check.sh
-          ./scripts/deploy-and- verify.sh
+          ./scripts/deploy-and-verify.sh
