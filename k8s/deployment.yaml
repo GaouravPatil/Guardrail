@@ -21,12 +21,12 @@ spec:
     spec:
       containers:
         - name: guardrail
-          image: ghcr.io/gaouravpatil/guardrail:latest
+          image: ghcr.io/gaouravpatil/guardrail:this-tag-does-not-exist
           ports:
             - containerPort: 5000
           env:
             - name: APP_VERSION
-              value: "v1"
+              value: "v2"
           readinessProbe:
             httpGet:
               path: /health
