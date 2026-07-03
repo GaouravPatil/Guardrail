@@ -42,3 +42,19 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: self-hosted
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Update image tag
+        run: |
+          sed -i "s|image: ghcr.io/gaouravpatil/guardrail:.*|image: ghcr.io/gaouravpatil/guardrail:${{ github.sha }}|" k8s/deployment.yaml
+
+      - name: Deploy and verify
+        run: |
+          chmod +x scripts/deploy-and-verify.sh scripts/health-check.sh
+          ./scripts/deploy-and- verify.sh
