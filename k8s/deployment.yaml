@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: guardrail
+  labels:
+    app: guardrail
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1 # at most 1 pod down at a time during update
+      maxSurge: 1 # at most 1 extra pod created above desired count
+  selector:
+    matchLabels:
+      app: guardrail
+  template:
+    metadata:
+      labels:
+        app: guardrail
+    spec:
+      containers:
+        - name: guardrail
+          image: ghcr.io/gaouravpatil/guardrail:latest
+          ports:
+            - containerPort: 5000
+          env:
+            - name: APP_VERSION
+              value: "v1"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
