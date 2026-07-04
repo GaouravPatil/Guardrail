@@ -3,7 +3,7 @@ FROM golang:1.23-alpine AS builder
 
 WORKDIR /app
 
-COPY go.mod .
+COPY go.mod go.sum .
 COPY main.go .
 
 # CGO_ENABLED=0 produces a fully static binary — no C library dependencies
