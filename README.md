@@ -123,7 +123,7 @@ ghcr.io/gaouravpatil/guardrail:b040f7f4838f3f4302468c30cca9f2b5940481ba
 
 ## 🔮 Future Scope — Phase 8: Observability
 
-Not yet built. Planned additions:
+Built. 
 
 - **Prometheus** — scrape request count, error rate, and latency metrics from the app
 - **Grafana** — visual dashboard with deployment events annotated directly on metrics graphs
