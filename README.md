@@ -74,6 +74,8 @@ sequenceDiagram
 | CD | **GitHub Actions (self-hosted runner)** | Deploys directly to a private, non-internet-facing cluster |
 | Registry | **GitHub Container Registry (GHCR)** | Immutable, SHA-tagged image storage |
 | Verification | **Custom Bash health-check gate** | Independent, second layer of health verification beyond Kubernetes' own probes |
+| Metrics | **Prometheus** | Scrapes and stores time-series data from the app's `/metrics` endpoint |
+| Dashboards | **Grafana** | Visualizes request rate and latency, with deploys annotated on the timeline |
 
 ---
 
@@ -118,16 +120,30 @@ ghcr.io/gaouravpatil/guardrail:b040f7f4838f3f4302468c30cca9f2b5940481ba
 | 6 | Independent health-check gate script (`health-check.sh`) | ✅ Done |
 | 7 | Automated rollback on failed health check | ✅ Done |
 | 7b | Full CI/CD wiring via self-hosted runner — push-to-deploy, fully automated | ✅ Done |
+| 8 | Observability — Prometheus metrics + Grafana dashboards | ✅ Done |
 
 ---
 
-## 🔮 Future Scope — Phase 8: Observability
+## 📈 Phase 8: Observability
 
-Built. 
+The app is instrumented with the official Prometheus Go client, exposing a `/metrics` endpoint alongside `/` and `/health`. Two custom metrics were added:
 
-- **Prometheus** — scrape request count, error rate, and latency metrics from the app
-- **Grafana** — visual dashboard with deployment events annotated directly on metrics graphs
-- Goal: go from *"the pipeline knows it healed itself"* to *"the team can see it happen and correlate it with real traffic patterns"*
+- **`guardrail_requests_total`** (Counter) — total requests, labeled by `path` and `status`
+- **`guardrail_request_duration_seconds`** (Histogram) — request latency, bucketed for percentile calculations
+
+**Prometheus** runs as an in-cluster Deployment, scraping the app every 15 seconds via Kubernetes' internal service discovery (`guardrail:5000`) — no hardcoded pod IPs. **Grafana** runs alongside it, connected to Prometheus as a data source, with a dashboard tracking:
+
+- **Request Rate by Endpoint** — `sum(rate(guardrail_requests_total[1m])) by (path)`
+- **p95 Latency by Endpoint** — `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
+
+Deployments can be manually annotated directly on the graph timeline, making it possible to visually confirm that request rate and latency stayed flat through a live rollout — the zero-downtime claim, proven visually rather than just in logs.
+
+```mermaid
+flowchart LR
+    A[Go app<br/>/metrics endpoint] -->|scraped every 15s| B[Prometheus]
+    B -->|queried via PromQL| C[Grafana Dashboard]
+    D[Deploy event] -.annotated on.-> C
+```
 
 ---
 
@@ -153,7 +169,11 @@ guardrail/
 ├── go.mod
 ├── k8s/
 │   ├── deployment.yaml          # Rolling update strategy, probes
-│   └── service.yaml             # NodePort service
+│   ├── service.yaml             # NodePort service
+│   └── monitoring/
+│       ├── prometheus-config.yaml       # Scrape configuration
+│       ├── prometheus-deployment.yaml   # Prometheus Deployment + Service
+│       └── grafana-deployment.yaml      # Grafana Deployment + Service
 └── scripts/
     ├── health-check.sh          # Independent health verification gate
     └── deploy-and-verify.sh     # Orchestrates deploy → verify → rollback
