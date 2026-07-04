@@ -15,11 +15,10 @@ sleep 2   # give port-forward a moment to establish
 
 cleanup() {
   local exit_code=$?
-  kill $PF_PID 2>/dev/null
+  kill $PF_PID 2>/dev/null || true
   exit $exit_code
 }
 trap cleanup EXIT
-
 
 echo "Checking health at http://localhost:5000/health ..."
 
