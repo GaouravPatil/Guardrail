@@ -178,5 +178,4 @@ guardrail/
     ├── health-check.sh          # Independent health verification gate
     └── deploy-and-verify.sh     # Orchestrates deploy → verify → rollback
 
-
-## OPEN FOR COLABORATION ##
+----
