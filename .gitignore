@@ -1,4 +1,5 @@
 server
+guardrail-deploy
 *.log
 .env
 actions-runner/

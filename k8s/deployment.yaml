@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: guardrail
-          image: ghcr.io/gaouravpatil/guardrail:this-tag-does-not-exist
+          image: ghcr.io/gaouravpatil/guardrail:latest  # CI replaces with commit SHA via sed
           ports:
             - containerPort: 5000
           env:
