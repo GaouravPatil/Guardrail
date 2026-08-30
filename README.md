@@ -177,5 +177,139 @@ guardrail/
 └── scripts/
     ├── health-check.sh          # Independent health verification gate
     └── deploy-and-verify.sh     # Orchestrates deploy → verify → rollback
+```
 
-----
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+
+| Tool | Version | Purpose |
+|---|---|---|
+| **Go** | 1.23+ | Build the application locally |
+| **Docker** | 20.10+ | Build container images |
+| **kubectl** | 1.28+ | Interact with your Kubernetes cluster |
+| **Kubernetes cluster** | 1.28+ | Runtime environment (kubeadm, minikube, or kind) |
+| **Git** | 2.30+ | Version control |
+
+### 1. Clone & Build Locally
+
+```bash
+# Clone the repository
+git clone https://github.com/GaouravPatil/Guardrail.git
+cd Guardrail
+
+# Install Go dependencies
+go mod download
+
+# Build the binary
+CGO_ENABLED=0 go build -o server main.go
+
+# Run locally
+./server
+# → Server starts on http://localhost:5000
+```
+
+Verify it's running:
+
+```bash
+curl http://localhost:5000/health
+# {"status":"healthy","version":"v2"}
+
+curl http://localhost:5000/metrics
+# Prometheus metrics output
+```
+
+### 2. Build the Docker Image
+
+```bash
+# Build the multi-stage image (~12.1 MB final size)
+docker build -t guardrail:local .
+
+# Run the container
+docker run -p 5000:5000 guardrail:local
+```
+
+### 3. Deploy to Kubernetes
+
+```bash
+# Apply the service and deployment
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/deployment.yaml
+
+# Verify pods are running (3 replicas)
+kubectl get pods -l app=guardrail
+
+# Check rollout status
+kubectl rollout status deployment/guardrail
+```
+
+Access the app via NodePort:
+
+```bash
+# Find the assigned NodePort
+kubectl get svc guardrail
+
+# Or port-forward for local access
+kubectl port-forward svc/guardrail 5000:5000
+curl http://localhost:5000/health
+```
+
+### 4. Set Up Monitoring (Prometheus + Grafana)
+
+```bash
+# Deploy Prometheus config, server, and Grafana
+kubectl apply -f k8s/monitoring/prometheus-config.yaml
+kubectl apply -f k8s/monitoring/prometheus-deployment.yaml
+kubectl apply -f k8s/monitoring/grafana-deployment.yaml
+
+# Verify monitoring pods
+kubectl get pods -l app=prometheus
+kubectl get pods -l app=grafana
+```
+
+Access the dashboards:
+
+```bash
+# Prometheus UI
+kubectl port-forward svc/prometheus 9090:9090
+# → http://localhost:9090
+
+# Grafana UI
+kubectl port-forward svc/grafana 3000:3000
+# → http://localhost:3000  (default login: admin / admin)
+```
+
+In Grafana, add Prometheus as a data source (`http://prometheus:9090`) and create panels with:
+
+- **Request Rate**: `sum(rate(guardrail_requests_total[1m])) by (path)`
+- **p95 Latency**: `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
+
+### 5. CI/CD Pipeline Setup
+
+The pipeline runs automatically on every push to `main`. To enable it on your fork:
+
+1. **GHCR access** — GitHub Actions uses `GITHUB_TOKEN` (automatic) to push images to `ghcr.io`
+2. **Self-hosted runner** — The deploy job runs on a self-hosted runner connected to your Kubernetes cluster:
+   ```bash
+   # On your cluster node, set up a GitHub Actions runner:
+   # Settings → Actions → Runners → New self-hosted runner
+   # Follow GitHub's setup instructions for Linux
+   ```
+3. **Push and watch** — Every push to `main` triggers: build → push to GHCR → deploy → health verify → auto-rollback if unhealthy
+
+### 6. Test the Self-Healing Rollback
+
+Simulate a bad deploy to see auto-rollback in action:
+
+```bash
+# Deploy a known-bad image tag
+kubectl set image deployment/guardrail guardrail=ghcr.io/gaouravpatil/guardrail:nonexistent
+
+# Watch Kubernetes detect the failure and the script roll back
+./scripts/deploy-and-verify.sh
+# → Health check fails → automatic rollback → previous version restored
+```
+
+---
