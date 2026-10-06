@@ -1,50 +1,83 @@
-name: CI/CD - Build, Push, Deploy
+```yaml
+name: CI/CD - Build, Scan, Push, Deploy
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
 
-# Least privilege by default; jobs escalate only what they need.
+# Default: read-only permissions.
 permissions:
   contents: read
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/gaouravpatil/guardrail
+
 jobs:
-  build-and-push:
+  build-scan-push:
+    name: Build, Scan & Push
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
     permissions:
       contents: read
-      packages: write # needed to push to GHCR
+      packages: write
+
     steps:
+      # ---------------------------------------------------------
+      # 1. Checkout
+      # ---------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Pin to the exact commit that triggered the run; the default
-          # branch tip can race ahead on a busy repo.
           ref: ${{ github.sha }}
           fetch-depth: 1
 
+      # ---------------------------------------------------------
+      # 2. Go setup
+      # ---------------------------------------------------------
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: "1.23"
           cache: true
 
-      - name: gofmt check
-        run: test -z "$(gofmt -l .)"
-
-      - name: Run vet + tests
+      # ---------------------------------------------------------
+      # 3. Code quality
+      # ---------------------------------------------------------
+      - name: Check formatting
         run: |
-          go vet ./...
-          go test -race -count=1 ./...
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "The following files are not formatted:"
+            gofmt -l .
+            exit 1
+          fi
 
-      - name: Set lowercase image name
-        run: echo "IMAGE_NAME=$(echo ghcr.io/${{ github.repository_owner }}/guardrail | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+      - name: Run Go vet
+        run: go vet ./...
 
+      - name: Run tests
+        run: go test -race -count=1 ./...
+
+      # ---------------------------------------------------------
+      # 4. Set image name
+      # ---------------------------------------------------------
+      - name: Set image metadata
+        run: |
+          IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/guardrail"
+          IMAGE_NAME="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+
+          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
+          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
+
+      # ---------------------------------------------------------
+      # 5. Login to GHCR
+      # ---------------------------------------------------------
       - name: Login to GitHub Container Registry
-        # Only real pushes need to log in / push; PRs from forks can't.
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
@@ -52,48 +85,103 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      # ---------------------------------------------------------
+      # 6. Setup Buildx
+      # ---------------------------------------------------------
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ---------------------------------------------------------
+      # 7. Build image
+      #
+      # PR:
+      #   Build only, don't push.
+      #
+      # main:
+      #   Build and push immutable SHA image + latest.
+      # ---------------------------------------------------------
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ github.event_name == 'push' }}
+
           tags: |
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
             ${{ env.IMAGE_NAME }}:latest
+
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
           provenance: true
           sbom: true
 
+      # ---------------------------------------------------------
+      # 8. Scan the exact image pushed to GHCR
+      # ---------------------------------------------------------
       - name: Scan image with Trivy
         if: github.event_name == 'push'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
           format: table
           severity: HIGH,CRITICAL
+          ignore-unfixed: true
           exit-code: "1"
 
+  # =============================================================
+  # DEPLOY
+  # =============================================================
+
   deploy:
-    needs: build-and-push
-    # Deploy only on pushes to main — PRs build but never touch the cluster.
+    name: Deploy to Kubernetes
+    needs: build-scan-push
+
+    # Deploy only after a successful push to main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     runs-on: self-hosted
     timeout-minutes: 10
+
     concurrency:
       group: guardrail-deploy
       cancel-in-progress: false
+
     permissions:
       contents: read
+
     steps:
-      - name: Checkout code
+
+      # ---------------------------------------------------------
+      # 1. Checkout the exact commit that was built
+      # ---------------------------------------------------------
+      - name: Checkout deployment scripts
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
-      - name: Deploy and verify (immutable SHA, no YAML sed)
+      # ---------------------------------------------------------
+      # 2. Verify kubectl exists
+      # ---------------------------------------------------------
+      - name: Verify Kubernetes access
         run: |
-          chmod +x scripts/deploy-and-verify.sh scripts/health-check.sh
-          IMAGE_NAME="$(echo "ghcr.io/${{ github.repository_owner }}/guardrail" | tr '[:upper:]' '[:lower:]')"
-          IMAGE="${IMAGE_NAME}:${{ github.sha }}" EXPECTED_VERSION="${{ github.sha }}" ./scripts/deploy-and-verify.sh
+          kubectl version --client
+          kubectl cluster-info
+
+      # ---------------------------------------------------------
+      # 3. Deploy immutable image
+      # ---------------------------------------------------------
+      - name: Deploy and verify
+        env:
+          IMAGE_NAME: ghcr.io/gaouravpatil/guardrail
+          IMAGE_TAG: ${{ github.sha }}
+          EXPECTED_VERSION: ${{ github.sha }}
+        run: |
+          chmod +x scripts/deploy-and-verify.sh
+          chmod +x scripts/health-check.sh
+
+          IMAGE="${IMAGE_NAME}:${IMAGE_TAG}" \
+          EXPECTED_VERSION="${EXPECTED_VERSION}" \
+          ./scripts/deploy-and-verify.sh
+```
