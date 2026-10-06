@@ -6,11 +6,18 @@ metadata:
     app: guardrail
 spec:
   replicas: 3
+  # Keep enough history for `rollout undo` to always find last-good revision.
+  revisionHistoryLimit: 10
+  # Fail the rollout (triggering rollback) if pods never become ready.
+  progressDeadlineSeconds: 120
+  # New pod must stay ready this long before the next one is touched.
+  minReadySeconds: 5
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxUnavailable: 1 # at most 1 pod down at a time during update
-      maxSurge: 1 # at most 1 extra pod created above desired count
+      # Zero-downtime: never take capacity below desired (was 1).
+      maxUnavailable: 0
+      maxSurge: 1
   selector:
     matchLabels:
       app: guardrail
@@ -19,23 +26,77 @@ spec:
       labels:
         app: guardrail
     spec:
+      # If GHCR is private, create once:
+      #   kubectl create secret docker-registry ghcr-pull-secret \
+      #     --docker-server=ghcr.io --docker-username=... --docker-password=...
+      # then uncomment:
+      # imagePullSecrets:
+      #   - name: ghcr-pull-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across nodes so one node loss != full outage.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: guardrail
       containers:
         - name: guardrail
-          image: ghcr.io/gaouravpatil/guardrail:latest  # CI replaces with commit SHA via sed
+          # Dev default. CI does NOT sed-edit this file; it runs
+          # `kubectl set image deployment/guardrail guardrail=<SHA>` instead.
+          image: ghcr.io/gaouravpatil/guardrail:dev
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 5000
+            - name: http
+              containerPort: 5000
           env:
+            # CI overwrites via `kubectl set env ... APP_VERSION=<sha>`
+            # (or --field-manager). Default "dev" never masquerades as a release.
             - name: APP_VERSION
-              value: "v2"
+              value: "dev"
+            - name: PORT
+              value: "5000"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # Startup gate: gives slow/cold pods up to ~60s before liveness kills them.
+          startupProbe:
+            httpGet:
+              path: /live
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 12
+          # Traffic gate: failing dependency removes pod from Service, not kill.
           readinessProbe:
             httpGet:
-              path: /health
-              port: 5000
-            initialDelaySeconds: 2
+              path: /ready
+              port: http
             periodSeconds: 5
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3
+          # Crash gate: cheap "am I alive" check only.
           livenessProbe:
             httpGet:
-              path: /health
-              port: 5000
-            initialDelaySeconds: 5
+              path: /live
+              port: http
             periodSeconds: 10
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 3

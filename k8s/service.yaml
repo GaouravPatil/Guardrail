@@ -2,10 +2,16 @@ apiVersion: v1
 kind: Service
 metadata:
   name: guardrail
+  labels:
+    app: guardrail
 spec:
-  type: NodePort
+  # ClusterIP: reachable in-cluster + via port-forward.
+  # NodePort exposed the app on every node with a random port; use an
+  # Ingress for external traffic instead.
+  type: ClusterIP
   selector:
     app: guardrail
   ports:
-    - port: 5000
-      targetPort: 5000
+    - name: http
+      port: 5000
+      targetPort: http

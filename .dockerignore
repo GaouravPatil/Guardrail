@@ -1,0 +1,15 @@
+# Keep the build context tiny and secret-free.
+# Without this, `docker build` ships ~900MB (actions-runner/, .git, binaries).
+.git/
+.github/
+actions-runner/
+*_diag/
+_work/
+k8s/
+scripts/
+.gitignore
+guardrail-deploy
+server
+*.log
+.env
+*.tar.gz

@@ -1,22 +1,28 @@
 # -BUILD-
-FROM golang:1.23-alpine AS builder
+FROM golang:1.23.5-alpine3.21 AS builder
 
 WORKDIR /app
 
-COPY go.mod go.sum .
-COPY main.go .
+# Leverage layer caching: deps first, source last.
+COPY go.mod go.sum ./
+RUN go mod download
 
-# CGO_ENABLED=0 produces a fully static binary — no C library dependencies
-# This is what lets us run it in an empty base image below
-RUN CGO_ENABLED=0 GOOS=linux go build -o server main.go
+COPY main.go main_test.go ./
+RUN go vet ./... && go test ./...
 
+# Static, stripped, reproducible binary. No C libs -> runs in scratch.
+# -trimpath removes local paths from the binary; -s -w strips symbols.
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /app/server main.go
 
 # -RUN-
 FROM scratch
 
 WORKDIR /app
 
-COPY --from=builder /app/server .
+# Run as non-root (65532 = distroless-style nonroot UID; scratch has no /etc/passwd
+# so Kubernetes runAsNonRoot + numeric UID is what actually enforces it).
+COPY --from=builder /app/server /app/server
 
 EXPOSE 5000
-CMD ["./server"]
+USER 65532:65532
+ENTRYPOINT ["/app/server"]

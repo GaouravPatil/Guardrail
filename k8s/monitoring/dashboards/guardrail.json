@@ -1,0 +1,37 @@
+{
+  "title": "Guardrail - Request Rate & Latency",
+  "tags": ["guardrail"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "Request Rate by Endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(guardrail_requests_total[1m])) by (path)",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "title": "p95 Latency by Endpoint",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))",
+          "legendFormat": "{{path}}"
+        }
+      ]
+    },
+    {
+      "title": "Error Rate (non-2xx)",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(guardrail_requests_total{status!~\"2..\"}[1m])) by (path, status)",
+          "legendFormat": "{{path}} {{status}}"
+        }
+      ]
+    }
+  ]
+}

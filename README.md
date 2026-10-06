@@ -85,21 +85,22 @@ sequenceDiagram
 |---|---|
 | **Final container image size** | **~12.1 MB** (vs. typical 150–200MB Python/Node images) |
 | **Base build image (discarded)** | ~800 MB — never shipped, thanks to multi-stage builds |
-| **Replica count** | 3 pods per deployment |
-| **Max unavailable during rollout** | 1 pod (2 of 3 always serving traffic) |
-| **Health check gate timeout** | 60 seconds, polled every 3 seconds |
-| **Rollout timeout before auto-rollback** | 90 seconds |
-| **Downtime during a healthy deploy** | **0 seconds** (verified via continuous curl loop during live rollout) |
-| **Downtime during a failed deploy** | **0 seconds** — traffic never routed to the broken version at all; auto-rollback restored last-good revision automatically |
-| **Manual steps required on failure** | **0** — fully automated detection + rollback |
+| **Replica count** | 3 pods per deployment, spread across nodes via `topologySpreadConstraints` |
+| **Max unavailable during rollout** | 0 pods (3 of 3 always serving traffic) |
+| **Health check gate timeout** | 60 seconds, polled every 3 seconds (validates body + `EXPECTED_VERSION`) |
+| **Rollout timeout before auto-rollback** | 120 seconds (matches `progressDeadlineSeconds`) |
+| **Downtime during a healthy deploy** | **0 seconds** (rolling update with `maxUnavailable: 0`; verify with 5s-scrape Prometheus + continuous curl) |
+| **Downtime during a failed deploy** | **~0 seconds when readiness gates hold** — traffic is only sent to `Ready` pods; a version that returns `200` on `/health` but `500` on `/` can still serve errors until the external gate rolls back — hence the version-aware `health-check.sh` + `rollout undo` |
+| **Manual steps required on failure** | **0** — fully automated detection + rollback (pipeline still exits non-zero so the failure is visible) |
 
 ---
 
 ## 🔢 Versioning Strategy
 
-- Every image is tagged with its **Git commit SHA** (`ghcr.io/.../guardrail:<sha>`) — never `:latest` in deployments.
+- Every image is tagged with its **Git commit SHA** (`ghcr.io/.../guardrail:<sha>`) — never `:latest` in deployments (CI deploys via `kubectl set image`, never `sed` on YAML).
+- `APP_VERSION` is injected at deploy time (`kubectl set env ... APP_VERSION=<sha>`) so `/health` reports the exact running SHA — default `dev` never masquerades as a release.
 - This makes every running version **traceable back to an exact commit**.
-- `kubectl rollout undo` uses Kubernetes' built-in revision history to restore the exact prior image — no guessing what "last stable" means.
+- `kubectl rollout undo` uses Kubernetes' built-in revision history (`revisionHistoryLimit: 10`) to restore the exact prior image — no guessing what "last stable" means.
 
 ```
 ghcr.io/gaouravpatil/guardrail:b040f7f4838f3f4302468c30cca9f2b5940481ba
@@ -126,12 +127,12 @@ ghcr.io/gaouravpatil/guardrail:b040f7f4838f3f4302468c30cca9f2b5940481ba
 
 ## 📈 Phase 8: Observability
 
-The app is instrumented with the official Prometheus Go client, exposing a `/metrics` endpoint alongside `/` and `/health`. Two custom metrics were added:
+The app is instrumented with the official Prometheus Go client, exposing a `/metrics` endpoint alongside `/`, `/health`, `/ready`, and `/live`. Two custom metrics were added (with real status codes, not hardcoded `200`):
 
 - **`guardrail_requests_total`** (Counter) — total requests, labeled by `path` and `status`
 - **`guardrail_request_duration_seconds`** (Histogram) — request latency, bucketed for percentile calculations
 
-**Prometheus** runs as an in-cluster Deployment, scraping the app every 15 seconds via Kubernetes' internal service discovery (`guardrail:5000`) — no hardcoded pod IPs. **Grafana** runs alongside it, connected to Prometheus as a data source, with a dashboard tracking:
+**Prometheus** runs as an in-cluster Deployment, scraping the app every 5 seconds via the in-cluster DNS name (`guardrail:5000`) — no hardcoded pod IPs — with 15d retention on a PVC. **Grafana** runs alongside it (pinned images, Secret password, PVC), connected to Prometheus as a data source, with a versioned dashboard (`k8s/monitoring/dashboards/guardrail.json`) tracking:
 
 - **Request Rate by Endpoint** — `sum(rate(guardrail_requests_total[1m])) by (path)`
 - **p95 Latency by Endpoint** — `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
@@ -140,7 +141,7 @@ Deployments can be manually annotated directly on the graph timeline, making it 
 
 ```mermaid
 flowchart LR
-    A[Go app<br/>/metrics endpoint] -->|scraped every 15s| B[Prometheus]
+    A[Go app<br/>/metrics endpoint] -->|scraped every 5s| B[Prometheus]
     B -->|queried via PromQL| C[Grafana Dashboard]
     D[Deploy event] -.annotated on.-> C
 ```
@@ -163,20 +164,26 @@ flowchart LR
 
 ```
 guardrail/
-├── .github/workflows/ci.yml     # CI (build/push) + CD (deploy/verify) pipeline
-├── Dockerfile                   # Multi-stage build → ~12.1MB final image
-├── main.go                      # App with /health endpoint
+├── .github/workflows/ci.yml     # CI (vet/test/scan/push) + CD (immutable SHA deploy)
+├── Dockerfile                   # Pinned multi-stage build → ~10MB static binary, non-root
+├── .dockerignore                # Keeps build context ~12MB (excludes actions-runner/, .git)
+├── main.go                      # App with /health, /ready, /live + real-status metrics
+├── main_test.go                 # Unit tests (handlers, metrics, panic recovery)
 ├── go.mod
 ├── k8s/
-│   ├── deployment.yaml          # Rolling update strategy, probes
-│   ├── service.yaml             # NodePort service
+│   ├── deployment.yaml          # RollingUpdate (maxUnavailable: 0), resources, probes, security
+│   ├── service.yaml             # ClusterIP service (port-forward / Ingress for access)
 │   └── monitoring/
-│       ├── prometheus-config.yaml       # Scrape configuration
-│       ├── prometheus-deployment.yaml   # Prometheus Deployment + Service
-│       └── grafana-deployment.yaml      # Grafana Deployment + Service
+│       ├── prometheus-config.yaml       # 5s scrape for guardrail job
+│       ├── prometheus-deployment.yaml   # Pinned image, retention, PVC, ClusterIP
+│       ├── prometheus-pvc.yaml          # 10Gi TSDB persistence
+│       ├── grafana-deployment.yaml      # Pinned image, Secret password, PVC, ClusterIP
+│       ├── grafana-pvc.yaml             # 5Gi dashboard persistence
+│       ├── grafana-secret.yaml          # Placeholder — create real secret out-of-band
+│       └── dashboards/guardrail.json    # Request-rate / p95 / error-rate dashboard (import)
 └── scripts/
-    ├── health-check.sh          # Independent health verification gate
-    └── deploy-and-verify.sh     # Orchestrates deploy → verify → rollback
+    ├── health-check.sh          # Version-aware gate (body + EXPECTED_VERSION check)
+    └── deploy-and-verify.sh     # kubectl set image → verify → waited rollback
 ```
 
 ---
@@ -215,7 +222,7 @@ Verify it's running:
 
 ```bash
 curl http://localhost:5000/health
-# {"status":"healthy","version":"v2"}
+# {"status":"healthy","version":"dev"}
 
 curl http://localhost:5000/metrics
 # Prometheus metrics output
@@ -245,13 +252,9 @@ kubectl get pods -l app=guardrail
 kubectl rollout status deployment/guardrail
 ```
 
-Access the app via NodePort:
+Access the app via port-forward (Service is ClusterIP; expose externally with an Ingress):
 
 ```bash
-# Find the assigned NodePort
-kubectl get svc guardrail
-
-# Or port-forward for local access
 kubectl port-forward svc/guardrail 5000:5000
 curl http://localhost:5000/health
 ```
@@ -259,9 +262,15 @@ curl http://localhost:5000/health
 ### 4. Set Up Monitoring (Prometheus + Grafana)
 
 ```bash
-# Deploy Prometheus config, server, and Grafana
+# Create the real Grafana password first (never commit it):
+kubectl create secret generic grafana-admin \
+  --from-literal=admin-password='REPLACE-ME' --dry-run=client -o yaml | kubectl apply -f -
+
+# Deploy Prometheus + Grafana (config, PVCs, deployments, ClusterIP services)
 kubectl apply -f k8s/monitoring/prometheus-config.yaml
+kubectl apply -f k8s/monitoring/prometheus-pvc.yaml
 kubectl apply -f k8s/monitoring/prometheus-deployment.yaml
+kubectl apply -f k8s/monitoring/grafana-pvc.yaml
 kubectl apply -f k8s/monitoring/grafana-deployment.yaml
 
 # Verify monitoring pods
@@ -278,13 +287,14 @@ kubectl port-forward svc/prometheus 9090:9090
 
 # Grafana UI
 kubectl port-forward svc/grafana 3000:3000
-# → http://localhost:3000  (default login: admin / admin)
+# → http://localhost:3000  (login: admin / password from grafana-admin Secret)
 ```
 
-In Grafana, add Prometheus as a data source (`http://prometheus:9090`) and create panels with:
+In Grafana, add Prometheus as a data source (`http://prometheus:9090`) and import `k8s/monitoring/dashboards/guardrail.json`:
 
 - **Request Rate**: `sum(rate(guardrail_requests_total[1m])) by (path)`
 - **p95 Latency**: `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
+- **Error Rate**: `sum(rate(guardrail_requests_total{status!~"2.."}[1m])) by (path, status)`
 
 ### 5. CI/CD Pipeline Setup
 
