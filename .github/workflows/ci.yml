@@ -1,4 +1,3 @@
-```yaml
 name: CI/CD - Build, Scan, Push, Deploy
 
 on:
@@ -151,7 +150,6 @@ jobs:
       contents: read
 
     steps:
-
       # ---------------------------------------------------------
       # 1. Checkout the exact commit that was built
       # ---------------------------------------------------------
@@ -184,4 +182,3 @@ jobs:
           IMAGE="${IMAGE_NAME}:${IMAGE_TAG}" \
           EXPECTED_VERSION="${EXPECTED_VERSION}" \
           ./scripts/deploy-and-verify.sh
-```
