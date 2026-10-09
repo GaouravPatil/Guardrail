@@ -40,7 +40,7 @@ if [ -z "$LOCAL_PORT" ]; then
 fi
 
 PF_LOG="$(mktemp)"
-kubectl port-forward "${NS_ARGS[@]:-}" "svc/${SERVICE}" "${LOCAL_PORT}:5000" >"$PF_LOG" 2>&1 &
+kubectl port-forward "${NS_ARGS[@]}" "svc/${SERVICE}" "${LOCAL_PORT}:5000" >"$PF_LOG" 2>&1 &
 PF_PID=$!
 
 cleanup() {

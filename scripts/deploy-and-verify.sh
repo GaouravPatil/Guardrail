@@ -44,29 +44,29 @@ if [ -z "$EXPECTED_VERSION" ] && [ -n "$IMAGE" ]; then
 fi
 
 echo "=== Applying manifests ==="
-kubectl apply "${NS_ARGS[@]:-}" -f "$REPO_ROOT/k8s/service.yaml"
-kubectl apply "${NS_ARGS[@]:-}" -f "$REPO_ROOT/k8s/deployment.yaml"
+kubectl apply "${NS_ARGS[@]}" -f "$REPO_ROOT/k8s/service.yaml"
+kubectl apply "${NS_ARGS[@]}" -f "$REPO_ROOT/k8s/deployment.yaml"
 
 if [ -n "$IMAGE" ]; then
   echo "=== Pinning image: ${IMAGE} ==="
-  kubectl set image "${NS_ARGS[@]:-}" deployment/guardrail "guardrail=${IMAGE}"
+  kubectl set image "${NS_ARGS[@]}" deployment/guardrail "guardrail=${IMAGE}"
   if [ -n "$EXPECTED_VERSION" ]; then
-    kubectl set env "${NS_ARGS[@]:-}" deployment/guardrail "APP_VERSION=${EXPECTED_VERSION}"
+    kubectl set env "${NS_ARGS[@]}" deployment/guardrail "APP_VERSION=${EXPECTED_VERSION}"
   fi
 fi
 
 rollback_and_wait() {
   local reason="$1"
   echo "$reason — rolling back"
-  kubectl rollout undo "${NS_ARGS[@]:-}" deployment/guardrail
+  kubectl rollout undo "${NS_ARGS[@]}" deployment/guardrail
   # Always wait so the pipeline never reports before the cluster healed.
-  kubectl rollout status "${NS_ARGS[@]:-}" deployment/guardrail --timeout=120s
-  kubectl rollout history "${NS_ARGS[@]:-}" deployment/guardrail | tail -5
+  kubectl rollout status "${NS_ARGS[@]}" deployment/guardrail --timeout=120s
+  kubectl rollout history "${NS_ARGS[@]}" deployment/guardrail | tail -5
   echo "Rollback complete. Previous stable version restored."
 }
 
 echo "=== Waiting for rollout (${ROLLOUT_TIMEOUT}) ==="
-if ! kubectl rollout status "${NS_ARGS[@]:-}" deployment/guardrail --timeout="$ROLLOUT_TIMEOUT"; then
+if ! kubectl rollout status "${NS_ARGS[@]}" deployment/guardrail --timeout="$ROLLOUT_TIMEOUT"; then
   rollback_and_wait "Rollout did not complete in time"
   exit 1
 fi
@@ -76,7 +76,7 @@ export TIMEOUT="$HEALTH_TIMEOUT"
 export EXPECTED_VERSION
 if "$SCRIPT_DIR/health-check.sh"; then
   echo "Deployment verified healthy. Success."
-  kubectl rollout history "${NS_ARGS[@]:-}" deployment/guardrail | tail -5
+  kubectl rollout history "${NS_ARGS[@]}" deployment/guardrail | tail -5
   if [ -n "$GRAFANA_ANNOTATE_URL" ]; then
     curl -s --max-time 5 -X POST "$GRAFANA_ANNOTATE_URL" \
       -H 'Content-Type: application/json' \
