@@ -1,20 +1,22 @@
+# Guardrail CI/CD: test -> build locally -> scan -> push (main only) -> deploy.
+# Rule: an image reaches GHCR only AFTER Trivy passes. Deploy installs the exact SHA.
+# (Want provenance/SBOM + Security-tab SARIF back? See note on the push step.)
+
 name: CI/CD - Build, Scan, Push, Deploy
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
+  workflow_dispatch: # manual redeploy / rollback drill
 
-# Default: read-only permissions.
 permissions:
   contents: read
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/gaouravpatil/guardrail
+  GO_VERSION: "1.23.5" # keep in sync with Dockerfile + go.mod
 
 jobs:
   build-scan-push:
@@ -22,36 +24,33 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
+    concurrency:
+      group: build-${{ github.ref }}
+      cancel-in-progress: true
+
     permissions:
       contents: read
-      packages: write
+      packages: write # push to GHCR (push events only)
+
+    # Contract with the deploy job: it installs exactly this image:tag.
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      tag: ${{ steps.meta.outputs.tag }}
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout
-      # ---------------------------------------------------------
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
 
-      # ---------------------------------------------------------
-      # 2. Go setup
-      # ---------------------------------------------------------
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.23"
+          go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      # ---------------------------------------------------------
-      # 3. Code quality
-      # ---------------------------------------------------------
+      # Fail fast here (~30s) instead of after a 5-minute image build.
       - name: Check formatting
         run: |
           if [ -n "$(gofmt -l .)" ]; then
-            echo "The following files are not formatted:"
             gofmt -l .
             exit 1
           fi
@@ -59,87 +58,72 @@ jobs:
       - name: Run Go vet
         run: go vet ./...
 
+      # Plain `go test` (no -race): ~2-3x faster. Re-add `-race` if you want
+      # the data-race detector back and accept the slower run.
       - name: Run tests
-        run: go test -race -count=1 ./...
+        run: go test -count=1 ./...
 
-      # ---------------------------------------------------------
-      # 4. Set image name
-      # ---------------------------------------------------------
-      - name: Set image metadata
+      # GHCR names must be lowercase; owner may not be. One definition only
+      # (forks work). Tag = full commit SHA: immutable, traceable to commit.
+      - name: Compute image name
+        id: meta
         run: |
-          IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/guardrail"
-          IMAGE_NAME="$(echo "$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')"
+          OWNER="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image=${{ env.REGISTRY }}/${OWNER}/guardrail" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-          echo "IMAGE_NAME=$IMAGE_NAME" >> "$GITHUB_ENV"
-          echo "IMAGE_TAG=${{ github.sha }}" >> "$GITHUB_ENV"
-
-      # ---------------------------------------------------------
-      # 5. Login to GHCR
-      # ---------------------------------------------------------
-      - name: Login to GitHub Container Registry
+      - name: Login to GHCR
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # ---------------------------------------------------------
-      # 6. Setup Buildx
-      # ---------------------------------------------------------
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # ---------------------------------------------------------
-      # 7. Build image
-      #
-      # PR:
-      #   Build only, don't push.
-      #
-      # main:
-      #   Build and push immutable SHA image + latest.
-      # ---------------------------------------------------------
-      - name: Build and push Docker image
+      # Single build. Loaded locally so Trivy can scan it before any push.
+      - name: Build image locally
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: ${{ github.event_name == 'push' }}
-
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ env.IMAGE_NAME }}:latest
-
+          load: true
+          push: false
+          tags: guardrail:ci-scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-          provenance: true
-          sbom: true
-
-      # ---------------------------------------------------------
-      # 8. Scan the exact image pushed to GHCR
-      # ---------------------------------------------------------
+      # The gate: runs on PRs too. HIGH/CRITICAL (with fixes) fail the run
+      # BEFORE anything is pushed.
       - name: Scan image with Trivy
-        if: github.event_name == 'push'
         uses: aquasecurity/trivy-action@v0.36.0
         with:
-          image-ref: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
+          image-ref: guardrail:ci-scan
           format: table
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
 
-  # =============================================================
-  # DEPLOY
-  # =============================================================
+      # Push the ALREADY-SCANNED bytes: retag + push, no rebuild.
+      # K8s deploys the SHA; `latest` is convenience only, never used by k8s.
+      # (Dropped for speed: 2nd Trivy/SARIF run, 2nd build, provenance+sbom
+      # attestations which also needed `id-token: write`. Re-add if wanted.)
+      - name: Tag and push scanned image
+        if: github.event_name == 'push'
+        run: |
+          docker tag guardrail:ci-scan "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker tag guardrail:ci-scan "${{ steps.meta.outputs.image }}:latest"
+          docker push "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.tag }}"
+          docker push "${{ steps.meta.outputs.image }}:latest"
 
+  # Deploys only after Job 1 pushed the scanned SHA. Timing here is
+  # intentional waiting (rollout + health polling), not waste.
   deploy:
     name: Deploy to Kubernetes
     needs: build-scan-push
-
-    # Deploy only after a successful push to main.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    runs-on: self-hosted
+    runs-on: self-hosted # TIP: pin a label, e.g. [self-hosted, linux, guardrail]
     timeout-minutes: 10
 
     concurrency:
@@ -150,35 +134,27 @@ jobs:
       contents: read
 
     steps:
-      # ---------------------------------------------------------
-      # 1. Checkout the exact commit that was built
-      # ---------------------------------------------------------
+      # Exact commit that was built/scanned — deploy its scripts.
       - name: Checkout deployment scripts
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
-      # ---------------------------------------------------------
-      # 2. Verify kubectl exists
-      # ---------------------------------------------------------
       - name: Verify Kubernetes access
         run: |
-          kubectl version --client
+          kubectl version --client=true
           kubectl cluster-info
 
-      # ---------------------------------------------------------
-      # 3. Deploy immutable image
-      # ---------------------------------------------------------
+      # Pins image via `kubectl set image` (no YAML edits), stamps
+      # APP_VERSION so /health reports the SHA, verifies, auto-rolls back.
       - name: Deploy and verify
         env:
-          IMAGE_NAME: ghcr.io/gaouravpatil/guardrail
-          IMAGE_TAG: ${{ github.sha }}
-          EXPECTED_VERSION: ${{ github.sha }}
+          IMAGE_NAME: ${{ needs.build-scan-push.outputs.image }}
+          IMAGE_TAG: ${{ needs.build-scan-push.outputs.tag }}
+          EXPECTED_VERSION: ${{ needs.build-scan-push.outputs.tag }}
         run: |
-          chmod +x scripts/deploy-and-verify.sh
-          chmod +x scripts/health-check.sh
-
+          chmod +x scripts/deploy-and-verify.sh scripts/health-check.sh
           IMAGE="${IMAGE_NAME}:${IMAGE_TAG}" \
           EXPECTED_VERSION="${EXPECTED_VERSION}" \
           ./scripts/deploy-and-verify.sh

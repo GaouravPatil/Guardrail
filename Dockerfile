@@ -7,8 +7,8 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 
-COPY main.go main_test.go ./
-RUN go vet ./... && go test ./...
+# CI already runs vet + tests — don't repeat them here (keeps image builds fast).
+COPY main.go ./
 
 # Static, stripped, reproducible binary. No C libs -> runs in scratch.
 # -trimpath removes local paths from the binary; -s -w strips symbols.
