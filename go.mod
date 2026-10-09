@@ -1,6 +1,6 @@
 module guardrail-deploy
 
-go 1.23.0
+go 1.27.2
 
 require github.com/prometheus/client_golang v1.23.2
 
