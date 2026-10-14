@@ -105,10 +105,6 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
-      # Push the ALREADY-SCANNED bytes: retag + push, no rebuild.
-      # K8s deploys the SHA; `latest` is convenience only, never used by k8s.
-      # (Dropped for speed: 2nd Trivy/SARIF run, 2nd build, provenance+sbom
-      # attestations which also needed `id-token: write`. Re-add if wanted.)
       - name: Tag and push scanned image
         if: github.event_name == 'push'
         run: |
@@ -119,6 +115,7 @@ jobs:
 
   # Deploys only after Job 1 pushed the scanned SHA. Timing here is
   # intentional waiting (rollout + health polling), not waste.
+
   deploy:
     name: Deploy to Kubernetes
     needs: build-scan-push

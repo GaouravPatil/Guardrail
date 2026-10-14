@@ -3,3 +3,4 @@ guardrail-deploy
 *.log
 .env
 actions-runner/
+guardrail-secret.yaml
