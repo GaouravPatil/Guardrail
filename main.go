@@ -1,3 +1,4 @@
+// Guardrail - small health-check service with Prometheus metrics.
 package main
 
 import (
@@ -16,13 +17,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-// Version is injected via APP_VERSION env (CI sets it to the image SHA).
-// Defaults to "dev" so an un-injected binary never pretends to be a release.
+// Set by CI (image SHA). "dev" when running locally.
 var Version = getEnv("APP_VERSION", "dev")
 
-// --- Metrics definitions ---
-
 var (
+	// How many requests we got, split by route and status code.
+	// We use the route pattern ("/health") not the real URL to keep metrics small.
 	requestCount = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "guardrail_requests_total",
@@ -31,6 +31,7 @@ var (
 		[]string{"path", "status"},
 	)
 
+	// How slow each route is.
 	requestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:    "guardrail_request_duration_seconds",
@@ -41,6 +42,7 @@ var (
 	)
 )
 
+// Read env var or use fallback if not set.
 func getEnv(key, fallback string) string {
 	if val := os.Getenv(key); val != "" {
 		return val
@@ -48,7 +50,7 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// statusRecorder captures the actual status code written by the handler.
+// http doesn't give us the status code back, so we wrap the writer to remember it.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -60,20 +62,22 @@ func (r *statusRecorder) WriteHeader(code int) {
 }
 
 func (r *statusRecorder) Write(b []byte) (int, error) {
+	// If handler just calls Write() without WriteHeader(), it means 200.
 	if r.status == 0 {
 		r.status = http.StatusOK
 	}
 	return r.ResponseWriter.Write(b)
 }
 
-// instrument wraps a handler to record real count + latency and recover panics.
-// route must be the registered route pattern (low cardinality), NOT r.URL.Path.
+// Wrap a handler to count requests, time them, and catch panics.
+// Pass the route pattern like "/health" - not r.URL.Path, or metrics will blow up.
 func instrument(route string, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w}
 
 		defer func() {
+			// One bad request shouldn't kill the whole server.
 			if err := recover(); err != nil {
 				log.Printf("panic on %s %s: %v", r.Method, r.URL.Path, err)
 				if rec.status == 0 {
@@ -92,6 +96,7 @@ func instrument(route string, handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// Small helper to send JSON + status code.
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
@@ -100,6 +105,7 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	}
 }
 
+// We only support GET on these endpoints. Returns false if it already sent the 405.
 func requireGET(w http.ResponseWriter, r *http.Request) bool {
 	if r.Method != http.MethodGet {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
@@ -108,12 +114,13 @@ func requireGET(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// GET / - just says hi + version.
 func homeHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireGET(w, r) {
 		return
 	}
-	// Exact-match: "/" previously acted as a catch-all and swallowed 404s
-	// (polluting the "/" metric). Return 404 for anything else.
+	// NOTE: "/" in Go matches everything, so check the path by hand.
+	// Otherwise /foo would look like a hit on "/" in our metrics.
 	if r.URL.Path != "/" {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
@@ -124,6 +131,7 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /health - for load balancers / uptime checks.
 func healthHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireGET(w, r) {
 		return
@@ -134,8 +142,8 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// liveHandler is cheap: process is running. Used for liveness/startup probes.
-// It must NOT check downstream dependencies.
+// GET /live - k8s liveness probe. Just "am I running?"
+// Don't check DB or anything here.
 func liveHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireGET(w, r) {
 		return
@@ -143,9 +151,9 @@ func liveHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "alive"})
 }
 
-// readyHandler gates traffic. Add DB/dependency checks here in the future.
-// Kept separate from /live so a failing dependency removes the pod from
-// service instead of killing it.
+// GET /ready - k8s readiness probe. "Can I take traffic?"
+// If we add a DB later, check it here. Keep separate from /live so
+// a bad DB takes us out of service instead of restarting us.
 func readyHandler(w http.ResponseWriter, r *http.Request) {
 	if !requireGET(w, r) {
 		return
@@ -156,6 +164,7 @@ func readyHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// Set up all routes.
 func newMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", instrument("/", homeHandler))
@@ -185,7 +194,7 @@ func main() {
 		}
 	}()
 
-	// Graceful shutdown on SIGINT/SIGTERM.
+	// Wait for Ctrl-C / docker stop, then give running requests 10s to finish.
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit

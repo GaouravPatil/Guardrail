@@ -171,8 +171,8 @@ guardrail/
 ├── main_test.go                 # Unit tests (handlers, metrics, panic recovery)
 ├── go.mod
 ├── k8s/
-│   ├── deployment.yaml          # RollingUpdate (maxUnavailable: 0), resources, probes, security
-│   ├── service.yaml             # ClusterIP service (port-forward / Ingress for access)
+│   ├── guardrail.yaml             # Deployment + Service together
+│   ├── guardrail-secret.yaml      # APP_VERSION + PORT (Secret, not hardcoded)
 │   └── monitoring/
 │       ├── prometheus-config.yaml       # 5s scrape for guardrail job
 │       ├── prometheus-deployment.yaml   # Pinned image, retention, PVC, ClusterIP
@@ -241,9 +241,9 @@ docker run -p 5000:5000 guardrail:local
 ### 3. Deploy to Kubernetes
 
 ```bash
-# Apply the service and deployment
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/deployment.yaml
+# Apply secret first, then deployment + service (single file)
+kubectl apply -f k8s/guardrail-secret.yaml
+kubectl apply -f k8s/guardrail.yaml
 
 # Verify pods are running (3 replicas)
 kubectl get pods -l app=guardrail
