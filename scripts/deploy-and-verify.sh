@@ -12,6 +12,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 IMAGE="${IMAGE:-}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
+NAMESPACE="${NAMESPACE:-guardrail}"
 
 # If image tag is ghcr.io/owner/guardrail:<sha>, expect that version back from /health.
 if [ -z "$EXPECTED_VERSION" ] && [ -n "$IMAGE" ]; then
@@ -19,23 +20,25 @@ if [ -z "$EXPECTED_VERSION" ] && [ -n "$IMAGE" ]; then
 fi
 
 echo "=== Applying manifests ==="
-kubectl apply -f "$REPO_ROOT/k8s/guardrail-secret.yaml"
-kubectl apply -f "$REPO_ROOT/k8s/guardrail.yaml"
+kubectl apply -f "$REPO_ROOT/k8s/00-namespace.yaml"
+for dir in 01-deployments 02-services 03-configs 04-secrets 05-pvcs 06-ingress; do
+  kubectl apply -R -f "$REPO_ROOT/k8s/$dir"
+done
 
 if [ -n "$IMAGE" ]; then
   echo "=== Pinning image: ${IMAGE} ==="
-  kubectl set image deployment/guardrail "guardrail=${IMAGE}"
-  kubectl set env deployment/guardrail "APP_VERSION=${EXPECTED_VERSION}"
+  kubectl -n "$NAMESPACE" set image deployment/guardrail "guardrail=${IMAGE}"
+  kubectl -n "$NAMESPACE" set env deployment/guardrail "APP_VERSION=${EXPECTED_VERSION}"
 fi
 
 rollback() {
   echo "$1 - rolling back"
-  kubectl rollout undo deployment/guardrail
-  kubectl rollout status deployment/guardrail --timeout=120s
+  kubectl -n "$NAMESPACE" rollout undo deployment/guardrail
+  kubectl -n "$NAMESPACE" rollout status deployment/guardrail --timeout=120s
 }
 
 echo "=== Waiting for rollout ==="
-if ! kubectl rollout status deployment/guardrail --timeout=120s; then
+if ! kubectl -n "$NAMESPACE" rollout status deployment/guardrail --timeout=120s; then
   rollback "Rollout failed"
   exit 1
 fi

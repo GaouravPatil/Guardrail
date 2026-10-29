@@ -10,11 +10,12 @@ set -euo pipefail
 
 TIMEOUT="${TIMEOUT:-60}"
 EXPECTED_VERSION="${EXPECTED_VERSION:-}"
+NAMESPACE="${NAMESPACE:-guardrail}"
 
 # Grab a free local port so we never clash.
 PORT=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1])')  
 
-kubectl port-forward svc/guardrail "$PORT:5000" >/dev/null 2>&1 &
+kubectl -n "$NAMESPACE" port-forward svc/guardrail "$PORT:5000" >/dev/null 2>&1 &
 PF_PID=$!
 
 cleanup() {

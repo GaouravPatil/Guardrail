@@ -132,7 +132,7 @@ The app is instrumented with the official Prometheus Go client, exposing a `/met
 - **`guardrail_requests_total`** (Counter) — total requests, labeled by `path` and `status`
 - **`guardrail_request_duration_seconds`** (Histogram) — request latency, bucketed for percentile calculations
 
-**Prometheus** runs as an in-cluster Deployment, scraping the app every 5 seconds via the in-cluster DNS name (`guardrail:5000`) — no hardcoded pod IPs — with 15d retention on a PVC. **Grafana** runs alongside it (pinned images, Secret password, PVC), connected to Prometheus as a data source, with a versioned dashboard (`k8s/monitoring/dashboards/guardrail.json`) tracking:
+**Prometheus** runs as an in-cluster Deployment, scraping the app every 5 seconds via the in-cluster DNS name (`guardrail:5000`) — no hardcoded pod IPs — with 15d retention on a PVC. **Grafana** runs alongside it (pinned images, Secret password, PVC), connected to Prometheus as a data source, with a versioned dashboard (`k8s/dashboards/guardrail.json`) tracking:
 
 - **Request Rate by Endpoint** — `sum(rate(guardrail_requests_total[1m])) by (path)`
 - **p95 Latency by Endpoint** — `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
@@ -171,16 +171,20 @@ guardrail/
 ├── main_test.go                 # Unit tests (handlers, metrics, panic recovery)
 ├── go.mod
 ├── k8s/
-│   ├── guardrail.yaml             # Deployment + Service together
-│   ├── guardrail-secret.yaml      # APP_VERSION + PORT (Secret, not hardcoded)
-│   └── monitoring/
-│       ├── prometheus-config.yaml       # 5s scrape for guardrail job
-│       ├── prometheus-deployment.yaml   # Pinned image, retention, PVC, ClusterIP
-│       ├── prometheus-pvc.yaml          # 10Gi TSDB persistence
-│       ├── grafana-deployment.yaml      # Pinned image, Secret password, PVC, ClusterIP
-│       ├── grafana-pvc.yaml             # 5Gi dashboard persistence
-│       ├── grafana-secret.yaml          # Placeholder — create real secret out-of-band
-│       └── dashboards/guardrail.json    # Request-rate / p95 / error-rate dashboard (import)
+│   ├── 00-namespace.yaml                # guardrail namespace
+│   ├── 01-deployments/
+│   │   ├── guardrail.yaml               # 3 replicas, zero-downtime rollout, probes
+│   │   ├── prometheus.yaml              # Pinned image, 15d retention, PVC
+│   │   └── grafana.yaml                 # Pinned image, Secret password, PVC
+│   ├── 02-services/                     # ClusterIP services (guardrail/prometheus/grafana)
+│   ├── 03-configs/
+│   │   ├── guardrail-config.yaml        # APP_VERSION + PORT (non-sensitive)
+│   │   ├── prometheus-config.yaml       # 5s scrape for guardrail job
+│   │   └── grafana-datasources.yaml     # Auto-provisions Prometheus data source
+│   ├── 04-secrets/grafana-admin.yaml    # Placeholder — replace before applying
+│   ├── 05-pvcs/                         # prometheus-data 10Gi, grafana-data 5Gi
+│   ├── 06-ingress/guardrail.yaml        # nginx Ingress for guardrail.gaourav.space
+│   └── dashboards/guardrail.json        # Request-rate / p95 / error-rate dashboard (import)
 └── scripts/
     ├── health-check.sh          # Version-aware gate (body + EXPECTED_VERSION check)
     └── deploy-and-verify.sh     # kubectl set image → verify → waited rollback
@@ -241,56 +245,55 @@ docker run -p 5000:5000 guardrail:local
 ### 3. Deploy to Kubernetes
 
 ```bash
-# Apply secret first, then deployment + service (single file)
-kubectl apply -f k8s/guardrail-secret.yaml
-kubectl apply -f k8s/guardrail.yaml
+# Apply in order: namespace -> deployments -> services -> configs -> secrets -> PVCs -> ingress
+kubectl apply -f k8s/00-namespace.yaml
+kubectl apply -R -f k8s/01-deployments
+kubectl apply -R -f k8s/02-services
+kubectl apply -R -f k8s/03-configs
+kubectl apply -R -f k8s/04-secrets
+kubectl apply -R -f k8s/05-pvcs
+kubectl apply -R -f k8s/06-ingress
 
 # Verify pods are running (3 replicas)
-kubectl get pods -l app=guardrail
+kubectl -n guardrail get pods -l app=guardrail
 
 # Check rollout status
-kubectl rollout status deployment/guardrail
+kubectl -n guardrail rollout status deployment/guardrail
 ```
 
-Access the app via port-forward (Service is ClusterIP; expose externally with an Ingress):
+Access the app via port-forward (Service is ClusterIP; expose externally with the Ingress):
 
 ```bash
-kubectl port-forward svc/guardrail 5000:5000
+kubectl -n guardrail port-forward svc/guardrail 5000:5000
 curl http://localhost:5000/health
 ```
 
 ### 4. Set Up Monitoring (Prometheus + Grafana)
 
 ```bash
-# Create the real Grafana password first (never commit it):
-kubectl create secret generic grafana-admin \
+# Replace the placeholder Grafana password before/after applying (never commit a real one):
+kubectl -n guardrail create secret generic grafana-admin \
   --from-literal=admin-password='REPLACE-ME' --dry-run=client -o yaml | kubectl apply -f -
 
-# Deploy Prometheus + Grafana (config, PVCs, deployments, ClusterIP services)
-kubectl apply -f k8s/monitoring/prometheus-config.yaml
-kubectl apply -f k8s/monitoring/prometheus-pvc.yaml
-kubectl apply -f k8s/monitoring/prometheus-deployment.yaml
-kubectl apply -f k8s/monitoring/grafana-pvc.yaml
-kubectl apply -f k8s/monitoring/grafana-deployment.yaml
-
-# Verify monitoring pods
-kubectl get pods -l app=prometheus
-kubectl get pods -l app=grafana
+# All monitoring resources are already part of the ordered apply above
+# (deployments, services, configs, secret, PVCs). Verify:
+kubectl -n guardrail get pods -l app=prometheus
+kubectl -n guardrail get pods -l app=grafana
 ```
 
 Access the dashboards:
 
 ```bash
 # Prometheus UI
-kubectl port-forward svc/prometheus 9090:9090
+kubectl -n guardrail port-forward svc/prometheus 9090:9090
 # → http://localhost:9090
 
 # Grafana UI
-kubectl port-forward svc/grafana 3000:3000
+kubectl -n guardrail port-forward svc/grafana 3000:3000
 # → http://localhost:3000  (login: admin / password from grafana-admin Secret)
 ```
 
-In Grafana, add Prometheus as a data source (`http://prometheus:9090`) and import `k8s/monitoring/dashboards/guardrail.json`:
+The Prometheus data source (`http://prometheus:9090`) is provisioned automatically by `k8s/03-configs/grafana-datasources.yaml`. Import `k8s/dashboards/guardrail.json` for the dashboard:
 
 - **Request Rate**: `sum(rate(guardrail_requests_total[1m])) by (path)`
 - **p95 Latency**: `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
