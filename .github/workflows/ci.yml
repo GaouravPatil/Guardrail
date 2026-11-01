@@ -117,12 +117,12 @@ jobs:
   # intentional waiting (rollout + health polling), not waste.
 
   deploy:
-    name: Deploy to Amazon EKS
+    name: Deploy to Local Kubernetes
     needs: build-scan-push
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # The EKS API endpoint must be reachable from GitHub-hosted runners.
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Runs on the self-hosted runner installed on the local cluster node.
+    runs-on: [self-hosted, local-k8s]
+    timeout-minutes: 15
 
     concurrency:
       group: guardrail-deploy
@@ -130,10 +130,6 @@ jobs:
 
     permissions:
       contents: read
-
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION }}
-      EKS_CLUSTER_NAME: ${{ vars.EKS_CLUSTER_NAME }}
 
     steps:
       # Exact commit that was built/scanned — deploy its scripts.
@@ -143,24 +139,12 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
 
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Update kubeconfig for EKS
-        run: |
-          aws eks update-kubeconfig \
-            --name "$EKS_CLUSTER_NAME" \
-            --region "$AWS_REGION"
-          kubectl config current-context
-
-      - name: Verify Kubernetes access
+      - name: Verify local cluster access
         run: |
           kubectl version --client=true
+          kubectl config current-context
           kubectl cluster-info
+          kubectl get nodes
 
       # Pins image via `kubectl set image` (no YAML edits), stamps
       # APP_VERSION so /health reports the SHA, verifies, auto-rolls back.
