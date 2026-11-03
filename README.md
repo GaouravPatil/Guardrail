@@ -148,7 +148,7 @@ guardrail/
 │   ├── 00-namespace.yaml                # guardrail namespace
 │   ├── 01-deployments/guardrail.yaml    # 3 replicas, zero-downtime rollout, probes
 │   ├── 02-services/guardrail.yaml       # ClusterIP service
-│   ├── 03-configs/guardrail-config.yaml # APP_VERSION + PORT (non-sensitive)
+│   ├── 03-configs/guardrail-config.yaml # PORT (non-sensitive)
 │   └── 06-ingress/guardrail.yaml        # nginx Ingress for guardrail.gaourav.space
 └── scripts/
     ├── health-check.sh          # Version-aware gate (body + EXPECTED_VERSION check)

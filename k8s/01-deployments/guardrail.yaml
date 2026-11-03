@@ -24,11 +24,6 @@ spec:
                 configMapKeyRef:
                   name: guardrail-config
                   key: PORT
-            - name: APP_VERSION
-              valueFrom:
-                configMapKeyRef:
-                  name: guardrail-config
-                  key: APP_VERSION
           readinessProbe:
             httpGet:
               path: /ready

@@ -4,5 +4,4 @@ metadata:
   name: guardrail-config
   namespace: guardrail
 data:
-  APP_VERSION: "dev"
   PORT: "5000"
