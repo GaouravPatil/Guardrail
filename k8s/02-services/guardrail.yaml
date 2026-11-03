@@ -3,13 +3,9 @@ kind: Service
 metadata:
   name: guardrail
   namespace: guardrail
-  labels:
-    app: guardrail
 spec:
-  type: ClusterIP
   selector:
     app: guardrail
   ports:
-    - name: http
-      port: 5000
-      targetPort: http
+    - port: 5000
+      targetPort: 5000

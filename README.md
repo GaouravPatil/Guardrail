@@ -74,8 +74,6 @@ sequenceDiagram
 | CD | **GitHub Actions (self-hosted runner)** | Deploys directly to a private, non-internet-facing cluster |
 | Registry | **GitHub Container Registry (GHCR)** | Immutable, SHA-tagged image storage |
 | Verification | **Custom Bash health-check gate** | Independent, second layer of health verification beyond Kubernetes' own probes |
-| Metrics | **Prometheus** | Scrapes and stores time-series data from the app's `/metrics` endpoint |
-| Dashboards | **Grafana** | Visualizes request rate and latency, with deploys annotated on the timeline |
 
 ---
 
@@ -88,8 +86,8 @@ sequenceDiagram
 | **Replica count** | 3 pods per deployment, spread across nodes via `topologySpreadConstraints` |
 | **Max unavailable during rollout** | 0 pods (3 of 3 always serving traffic) |
 | **Health check gate timeout** | 60 seconds, polled every 3 seconds (validates body + `EXPECTED_VERSION`) |
-| **Rollout timeout before auto-rollback** | 120 seconds (matches `progressDeadlineSeconds`) |
-| **Downtime during a healthy deploy** | **0 seconds** (rolling update with `maxUnavailable: 0`; verify with 5s-scrape Prometheus + continuous curl) |
+| **Rollout timeout before auto-rollback** | 120 seconds (`kubectl rollout status` timeout) |
+| **Downtime during a healthy deploy** | **0 seconds** (rolling update with `maxUnavailable: 0`; verify with continuous curl) |
 | **Downtime during a failed deploy** | **~0 seconds when readiness gates hold** — traffic is only sent to `Ready` pods; a version that returns `200` on `/health` but `500` on `/` can still serve errors until the external gate rolls back — hence the version-aware `health-check.sh` + `rollout undo` |
 | **Manual steps required on failure** | **0** — fully automated detection + rollback (pipeline still exits non-zero so the failure is visible) |
 
@@ -121,30 +119,6 @@ ghcr.io/gaouravpatil/guardrail:b040f7f4838f3f4302468c30cca9f2b5940481ba
 | 6 | Independent health-check gate script (`health-check.sh`) | ✅ Done |
 | 7 | Automated rollback on failed health check | ✅ Done |
 | 7b | Full CI/CD wiring via self-hosted runner — push-to-deploy, fully automated | ✅ Done |
-| 8 | Observability — Prometheus metrics + Grafana dashboards | ✅ Done |
-
----
-
-## 📈 Phase 8: Observability
-
-The app is instrumented with the official Prometheus Go client, exposing a `/metrics` endpoint alongside `/`, `/health`, `/ready`, and `/live`. Two custom metrics were added (with real status codes, not hardcoded `200`):
-
-- **`guardrail_requests_total`** (Counter) — total requests, labeled by `path` and `status`
-- **`guardrail_request_duration_seconds`** (Histogram) — request latency, bucketed for percentile calculations
-
-**Prometheus** runs as an in-cluster Deployment, scraping the app every 5 seconds via the in-cluster DNS name (`guardrail:5000`) — no hardcoded pod IPs — with 15d retention on a PVC. **Grafana** runs alongside it (pinned images, Secret password, PVC), connected to Prometheus as a data source, with a versioned dashboard (`k8s/dashboards/guardrail.json`) tracking:
-
-- **Request Rate by Endpoint** — `sum(rate(guardrail_requests_total[1m])) by (path)`
-- **p95 Latency by Endpoint** — `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
-
-Deployments can be manually annotated directly on the graph timeline, making it possible to visually confirm that request rate and latency stayed flat through a live rollout — the zero-downtime claim, proven visually rather than just in logs.
-
-```mermaid
-flowchart LR
-    A[Go app<br/>/metrics endpoint] -->|scraped every 5s| B[Prometheus]
-    B -->|queried via PromQL| C[Grafana Dashboard]
-    D[Deploy event] -.annotated on.-> C
-```
 
 ---
 
@@ -167,24 +141,15 @@ guardrail/
 ├── .github/workflows/ci.yml     # CI (vet/test/scan/push) + CD (immutable SHA deploy)
 ├── Dockerfile                   # Pinned multi-stage build → ~10MB static binary, non-root
 ├── .dockerignore                # Keeps build context ~12MB (excludes actions-runner/, .git)
-├── main.go                      # App with /health, /ready, /live + real-status metrics
+├── main.go                      # App with /health, /ready, /live endpoints
 ├── main_test.go                 # Unit tests (handlers, metrics, panic recovery)
 ├── go.mod
 ├── k8s/
 │   ├── 00-namespace.yaml                # guardrail namespace
-│   ├── 01-deployments/
-│   │   ├── guardrail.yaml               # 3 replicas, zero-downtime rollout, probes
-│   │   ├── prometheus.yaml              # Pinned image, 15d retention, PVC
-│   │   └── grafana.yaml                 # Pinned image, Secret password, PVC
-│   ├── 02-services/                     # ClusterIP services (guardrail/prometheus/grafana)
-│   ├── 03-configs/
-│   │   ├── guardrail-config.yaml        # APP_VERSION + PORT (non-sensitive)
-│   │   ├── prometheus-config.yaml       # 5s scrape for guardrail job
-│   │   └── grafana-datasources.yaml     # Auto-provisions Prometheus data source
-│   ├── 04-secrets/grafana-admin.yaml    # Placeholder — replace before applying
-│   ├── 05-pvcs/                         # prometheus-data 10Gi, grafana-data 5Gi
-│   ├── 06-ingress/guardrail.yaml        # nginx Ingress for guardrail.gaourav.space
-│   └── dashboards/guardrail.json        # Request-rate / p95 / error-rate dashboard (import)
+│   ├── 01-deployments/guardrail.yaml    # 3 replicas, zero-downtime rollout, probes
+│   ├── 02-services/guardrail.yaml       # ClusterIP service
+│   ├── 03-configs/guardrail-config.yaml # APP_VERSION + PORT (non-sensitive)
+│   └── 06-ingress/guardrail.yaml        # nginx Ingress for guardrail.gaourav.space
 └── scripts/
     ├── health-check.sh          # Version-aware gate (body + EXPECTED_VERSION check)
     └── deploy-and-verify.sh     # kubectl set image → verify → waited rollback
@@ -227,9 +192,6 @@ Verify it's running:
 ```bash
 curl http://localhost:5000/health
 # {"status":"healthy","version":"dev"}
-
-curl http://localhost:5000/metrics
-# Prometheus metrics output
 ```
 
 ### 2. Build the Docker Image
@@ -245,13 +207,11 @@ docker run -p 5000:5000 guardrail:local
 ### 3. Deploy to Kubernetes
 
 ```bash
-# Apply in order: namespace -> deployments -> services -> configs -> secrets -> PVCs -> ingress
+# Apply in order: namespace -> deployments -> services -> configs -> ingress
 kubectl apply -f k8s/00-namespace.yaml
 kubectl apply -R -f k8s/01-deployments
 kubectl apply -R -f k8s/02-services
 kubectl apply -R -f k8s/03-configs
-kubectl apply -R -f k8s/04-secrets
-kubectl apply -R -f k8s/05-pvcs
 kubectl apply -R -f k8s/06-ingress
 
 # Verify pods are running (3 replicas)
@@ -268,38 +228,7 @@ kubectl -n guardrail port-forward svc/guardrail 5000:5000
 curl http://localhost:5000/health
 ```
 
-### 4. Set Up Monitoring (Prometheus + Grafana)
-
-```bash
-# Replace the placeholder Grafana password before/after applying (never commit a real one):
-kubectl -n guardrail create secret generic grafana-admin \
-  --from-literal=admin-password='REPLACE-ME' --dry-run=client -o yaml | kubectl apply -f -
-
-# All monitoring resources are already part of the ordered apply above
-# (deployments, services, configs, secret, PVCs). Verify:
-kubectl -n guardrail get pods -l app=prometheus
-kubectl -n guardrail get pods -l app=grafana
-```
-
-Access the dashboards:
-
-```bash
-# Prometheus UI
-kubectl -n guardrail port-forward svc/prometheus 9090:9090
-# → http://localhost:9090
-
-# Grafana UI
-kubectl -n guardrail port-forward svc/grafana 3000:3000
-# → http://localhost:3000  (login: admin / password from grafana-admin Secret)
-```
-
-The Prometheus data source (`http://prometheus:9090`) is provisioned automatically by `k8s/03-configs/grafana-datasources.yaml`. Import `k8s/dashboards/guardrail.json` for the dashboard:
-
-- **Request Rate**: `sum(rate(guardrail_requests_total[1m])) by (path)`
-- **p95 Latency**: `histogram_quantile(0.95, sum(rate(guardrail_request_duration_seconds_bucket[5m])) by (le, path))`
-- **Error Rate**: `sum(rate(guardrail_requests_total{status!~"2.."}[1m])) by (path, status)`
-
-### 5. CI/CD Pipeline Setup
+### 4. CI/CD Pipeline Setup
 
 The pipeline runs automatically on every push to `main`. To enable it on your fork:
 
@@ -312,7 +241,7 @@ The pipeline runs automatically on every push to `main`. To enable it on your fo
    ```
 3. **Push and watch** — Every push to `main` triggers: build → push to GHCR → deploy → health verify → auto-rollback if unhealthy
 
-### 6. Test the Self-Healing Rollback
+### 5. Test the Self-Healing Rollback
 
 Simulate a bad deploy to see auto-rollback in action:
 

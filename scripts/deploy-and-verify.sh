@@ -21,7 +21,7 @@ fi
 
 echo "=== Applying manifests ==="
 kubectl apply -f "$REPO_ROOT/k8s/00-namespace.yaml"
-for dir in 01-deployments 02-services 03-configs 04-secrets 05-pvcs 06-ingress; do
+for dir in 01-deployments 02-services 03-configs 06-ingress; do
   kubectl apply -R -f "$REPO_ROOT/k8s/$dir"
 done
 
